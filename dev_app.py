@@ -127,6 +127,28 @@ def set_mode(mode):
         {"mode": mode, "set_at": firestore.SERVER_TIMESTAMP}, merge=True)
 
 
+def send_drive(cmd, speed):
+    st.session_state.last_drive = f"{cmd} · {speed} m/s · {time.strftime('%H:%M:%S')}"
+    if DEMO:
+        return
+    from firebase_admin import firestore
+    db.collection("robots").document(f"{ROBOT_ID}_control").set(
+        {"drive": {"cmd": cmd, "speed": speed, "seq": time.time_ns(), "at": firestore.SERVER_TIMESTAMP}},
+        merge=True)
+
+
+def send_say(text):
+    text = (text or "").strip()[:120]
+    if not text:
+        return
+    st.session_state.last_say = text
+    if DEMO:
+        return
+    from firebase_admin import firestore
+    db.collection("robots").document(f"{ROBOT_ID}_control").set(
+        {"say": {"text": text, "seq": time.time_ns(), "at": firestore.SERVER_TIMESTAMP}}, merge=True)
+
+
 def get_requested_mode():
     if DEMO:
         return st.session_state.get("demo_mode", "MANUAL")
@@ -282,6 +304,54 @@ def map_panel():
         st.info("No GPS position yet (needs open sky).")
 
 
+@st.fragment
+def drive_panel():
+    """Arrow buttons: each tap = a ~0.6 s nudge, then the robot stops by itself."""
+    st.subheader("🕹️ Remote drive")
+    manual = get_requested_mode() == "MANUAL"
+    if not manual:
+        st.info("Switch to 🎮 Manual (top bar) to drive from here.")
+    speed = 0.3 if st.radio("Speed", ["Slow", "Normal"], horizontal=True, key="drive_speed") == "Slow" else 0.5
+    off = not manual
+    # Keep the arrow cross side by side on phones (Streamlit stacks columns on narrow screens)
+    st.markdown("""<style>
+      .st-key-drivepad [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: .5rem !important; }
+      .st-key-drivepad [data-testid="stColumn"] { min-width: 0 !important; width: auto !important; flex: 1 1 0 !important; }
+      .st-key-drivepad button { min-height: 3rem; font-size: 1.4rem; }
+    </style>""", unsafe_allow_html=True)
+    pad = st.container(key="drivepad")
+    _, up, _ = pad.columns(3)
+    up.button("⬆️", key="d_fwd", on_click=send_drive, args=("forward", speed), disabled=off,
+              use_container_width=True, help="Forward")
+    lt, stp, rt = pad.columns(3)
+    lt.button("⬅️", key="d_left", on_click=send_drive, args=("left", speed), disabled=off,
+              use_container_width=True, help="Forward + turn left")
+    stp.button("⏹️", key="d_stop", on_click=send_drive, args=("stop", speed),
+               use_container_width=True, help="Stop now")
+    rt.button("➡️", key="d_right", on_click=send_drive, args=("right", speed), disabled=off,
+              use_container_width=True, help="Forward + turn right")
+    _, dn, _ = pad.columns(3)
+    dn.button("⬇️", key="d_back", on_click=send_drive, args=("back", speed), disabled=off,
+              use_container_width=True, help="Backward")
+    st.caption("Each tap moves the robot about half a second, then it stops. "
+               "Commands take 0.5–2 s to arrive, so watch the camera and tap gently. "
+               + (f"Last sent: {st.session_state['last_drive']}" if st.session_state.get("last_drive") else ""))
+
+    st.markdown("**📢 Make the robot speak**")
+    q1, q2, q3 = st.columns(3)
+    q1.button("Excuse me!", key="say1", on_click=send_say, args=("Excuse me, coming through!",), use_container_width=True)
+    q2.button("Food's here", key="say2", on_click=send_say, args=("Your food is here!",), use_container_width=True)
+    q3.button("Hello 👋", key="say3", on_click=send_say, args=("Hello! I am Aerohawk, your campus delivery robot.",),
+              use_container_width=True)
+    with st.form("say_form", clear_on_submit=True, border=False):
+        a, b = st.columns([3, 1], vertical_alignment="bottom")
+        text = a.text_input("Say something", max_chars=120, placeholder="Type a message…")
+        if b.form_submit_button("Say", use_container_width=True):
+            send_say(text)
+    if st.session_state.get("last_say"):
+        st.caption(f"Last said: “{st.session_state['last_say']}”")
+
+
 def camera_and_status():
     cam_col, info_col = st.columns([2.2, 1], gap="large")
     with cam_col:
@@ -303,6 +373,8 @@ def camera_and_status():
                        "and only works when the dashboard runs on your laptop (not the online version).")
     with info_col:
         status_panel()
+        st.divider()
+        drive_panel()
     map_panel()
 
 
