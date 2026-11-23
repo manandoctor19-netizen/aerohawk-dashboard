@@ -18,7 +18,7 @@ st.set_page_config(page_title="Aerohawk Dev", page_icon="🛠️", layout="wide"
 
 ROBOT_ID = "aerohawk"
 TAYLOR_CENTER = (32.3690, -86.1770)      # approximate, only used for demo mode
-STATUSES = ["new", "queued", "accepted", "picked_up", "delivered", "cancelled"]
+STATUSES = ["new", "queued", "accepted", "picked_up", "arrived", "delivered", "cancelled"]
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +503,11 @@ def orders_panel():
                        + ("  ✅ code entered on robot" if o.get("delivered_by") == "pickup_code" else "")
                        + (f"  🚨 {o['wrong_code_attempts']} wrong code tries" if o.get("wrong_code_attempts", 0) >= 3 else ""))
             cur = o.get("status")
+            if cur == "picked_up" and b.button("📍 Arrived: show keypad", key=f"arr_{o['id']}",
+                                               type="primary", use_container_width=True,
+                                               help="The robot is at the drop-off. Its screen switches from eyes to the code keypad."):
+                set_status(o["id"], "arrived")
+                st.rerun(scope="fragment")
             new = b.selectbox("Set status", STATUSES, index=STATUSES.index(cur) if cur in STATUSES else 0,
                               key=f"sel_{o['id']}", label_visibility="collapsed")
             c1, c2 = b.columns(2)
@@ -533,7 +538,7 @@ def kitchen_panel():
     st.caption("Press **Start preparing** when you begin, and **Ready for robot** when the food is bagged. "
                "The student's phone updates within ~3 s.")
     active = [o for o in get_orders(30)
-              if o.get("status") not in ("delivered", "cancelled", "picked_up")]
+              if o.get("status") not in ("delivered", "cancelled", "picked_up", "arrived")]
     active.sort(key=lambda o: str(o.get("created_at", "")))   # oldest first
     if not active:
         st.success("No orders waiting. 🎉")
