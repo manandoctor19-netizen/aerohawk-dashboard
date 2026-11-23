@@ -365,6 +365,49 @@ def map_panel():
         st.caption(f"{r['lat']:.6f}, {r['lon']:.6f}  ·  GPS is accurate to about 2-5 m")
     else:
         st.info("No GPS position yet (needs open sky).")
+    dropoff_spots_editor(r)
+
+
+DROPOFF_BUILDINGS = ["Library", "Goodwyn Hall", "Clement Hall", "Education Building", "Taylor Center"]
+
+
+@st.cache_data(ttl=20)
+def _cloud_dropoff_spots():
+    d = db.collection("config").document("dropoffs").get()
+    return (d.to_dict() or {}) if d.exists else {}
+
+
+def load_dropoff_spots():
+    return st.session_state.get("demo_spots", {}) if DEMO else _cloud_dropoff_spots()
+
+
+def dropoff_spots_editor(r):
+    """Save each building's drop-off spot once; the robot then opens the keypad by itself there."""
+    spots = load_dropoff_spots()
+    done = [b for b in DROPOFF_BUILDINGS if b in spots]
+    with st.expander(f"📌 Drop-off spots ({len(done)}/{len(DROPOFF_BUILDINGS)} saved)",
+                     expanded=len(done) < len(DROPOFF_BUILDINGS)):
+        st.caption("Drive the robot to the exact spot where students meet it at each building, "
+                   "then press Save. On deliveries, when the robot stops within ~12 m of that spot, "
+                   "its screen switches from eyes to the keypad by itself.")
+        for b in DROPOFF_BUILDINGS:
+            sp = spots.get(b)
+            st.markdown(f"{'✅' if sp else '⬜'} **{b}**" + (f" · {sp['lat']:.6f}, {sp['lon']:.6f}" if sp else ""))
+        has_gps = r.get("gps_fix") and r.get("lat") is not None
+        c1, c2 = st.columns([2, 1], vertical_alignment="bottom")
+        b = c1.selectbox("Building", DROPOFF_BUILDINGS, key="spot_building")
+        if c2.button("📌 Save this spot", disabled=not has_gps, use_container_width=True,
+                     help="Saves the robot's current GPS position" if has_gps else "Needs a GPS fix"):
+            spot = {"lat": float(r["lat"]), "lon": float(r["lon"])}
+            if DEMO:
+                st.session_state.setdefault("demo_spots", {})[b] = spot
+            else:
+                db.collection("config").document("dropoffs").set({b: spot}, merge=True)
+            _cloud_dropoff_spots.clear()
+            st.toast(f"Saved drop-off spot for {b}")
+            st.rerun()
+        if not has_gps:
+            st.caption("Waiting for a GPS fix from the robot (go outside, open sky).")
 
 
 @st.fragment
@@ -503,9 +546,9 @@ def orders_panel():
                        + ("  ✅ code entered on robot" if o.get("delivered_by") == "pickup_code" else "")
                        + (f"  🚨 {o['wrong_code_attempts']} wrong code tries" if o.get("wrong_code_attempts", 0) >= 3 else ""))
             cur = o.get("status")
-            if cur == "picked_up" and b.button("📍 Arrived: show keypad", key=f"arr_{o['id']}",
+            if cur == "picked_up" and b.button("📍 Arrived (manual)", key=f"arr_{o['id']}",
                                                type="primary", use_container_width=True,
-                                               help="The robot is at the drop-off. Its screen switches from eyes to the code keypad."):
+                                               help="Backup: the robot does this by itself at a saved drop-off spot. Use this if GPS is off."):
                 set_status(o["id"], "arrived")
                 st.rerun(scope="fragment")
             new = b.selectbox("Set status", STATUSES, index=STATUSES.index(cur) if cur in STATUSES else 0,
