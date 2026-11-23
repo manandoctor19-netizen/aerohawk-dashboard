@@ -41,6 +41,47 @@ db = get_db()
 DEMO = db is None
 
 
+@st.cache_resource
+def live():
+    """Firestore listeners shared by everyone viewing the dashboard.
+
+    Firebase's free plan allows 50,000 reads a day. Re-reading every 2-4 s would use that up
+    in about an hour, so instead we listen: Firestore sends only what changed, and every
+    refresh below reads from memory (0 reads).
+    """
+    from firebase_admin import firestore
+
+    class Live:
+        robot, control, orders, alerts = {}, {}, {}, {}
+
+    L = Live()
+
+    def one_doc(attr):
+        def cb(docs, changes, read_time):
+            for d in docs:
+                setattr(L, attr, d.to_dict() or {})
+        return cb
+
+    def many(attr):
+        def cb(docs, changes, read_time):
+            setattr(L, attr, {d.id: {"id": d.id, **(d.to_dict() or {})} for d in docs})
+        return cb
+
+    desc = firestore.Query.DESCENDING
+    L.watches = [
+        db.collection("robots").document(ROBOT_ID).on_snapshot(one_doc("robot")),
+        db.collection("robots").document(f"{ROBOT_ID}_control").on_snapshot(one_doc("control")),
+        db.collection("orders").order_by("created_at", direction=desc).limit(40).on_snapshot(many("orders")),
+        db.collection("alerts").order_by("at", direction=desc).limit(10).on_snapshot(many("alerts")),
+    ]
+    return L
+
+
+def _newest_first(rows, field):
+    far_past = dt.datetime(2000, 1, 1, tzinfo=dt.timezone.utc)
+    return sorted(rows, key=lambda r: r.get(field) or far_past, reverse=True)
+
+
 def now_utc():
     return dt.datetime.now(dt.timezone.utc)
 
@@ -58,8 +99,7 @@ def get_robot():
             "last_seen": now_utc(), "camera_jpeg": None,
             "mode": st.session_state.get("demo_mode", "MANUAL"),
         }
-    snap = db.collection("robots").document(ROBOT_ID).get()
-    return snap.to_dict() if snap.exists else None
+    return dict(live().robot) or None
 
 
 def get_orders(limit=15):
@@ -78,11 +118,7 @@ def get_orders(limit=15):
                            {"name": "Blueberry muffin", "qty": 1, "price": 2.95}]},
             ]
         return st.session_state.demo_orders
-    from firebase_admin import firestore
-    q = (db.collection("orders")
-         .order_by("created_at", direction=firestore.Query.DESCENDING)
-         .limit(limit))
-    return [{"id": d.id, **d.to_dict()} for d in q.stream()]
+    return _newest_first(list(live().orders.values()), "created_at")[:limit]
 
 
 def set_status(order_id, status):
@@ -180,8 +216,7 @@ def send_say(text):
 def get_requested_mode():
     if DEMO:
         return st.session_state.get("demo_mode", "MANUAL")
-    snap = db.collection("robots").document(f"{ROBOT_ID}_control").get()
-    return (snap.to_dict() or {}).get("mode", "MANUAL") if snap.exists else "MANUAL"
+    return live().control.get("mode", "MANUAL")
 
 
 # ---------------------------------------------------------------------------
@@ -443,15 +478,19 @@ def orders_panel():
     st.subheader("All orders")
     st.caption("Override buttons change the status the student sees. Use them if the robot gets stuck during the demo. "
                "At delivery, check the student's pickup code against this list.")
-    orders = get_orders()
-    n_done = sum(1 for o in orders if o.get("status") in FINISHED)
-    if st.button(f"🧹 Clear finished orders ({n_done} shown)", disabled=n_done == 0,
-                 help="Deletes every delivered and cancelled order. Active orders stay."):
+    all_orders = get_orders(40)
+    n_done = sum(1 for o in all_orders if o.get("status") in FINISHED)
+    a, b = st.columns([1, 1], vertical_alignment="center")
+    show_done = a.toggle(f"Show finished orders ({n_done})", value=False, key="show_done",
+                         help="Delivered and cancelled orders are hidden so the list stays short.")
+    if b.button(f"🧹 Delete finished orders ({n_done})", disabled=n_done == 0,
+                help="Permanently deletes every delivered and cancelled order. Active orders stay."):
         removed = clear_finished_orders()
         st.toast(f"Removed {removed} finished order(s)")
         st.rerun(scope="fragment")
+    orders = all_orders if show_done else [o for o in all_orders if o.get("status") not in FINISHED]
     if not orders:
-        st.info("No orders yet.")
+        st.info("No active orders right now." if n_done else "No orders yet.")
         return
     pending = st.session_state.get("pending_delete")
     for o in orders:
@@ -525,9 +564,7 @@ def kitchen_panel():
 def get_alerts():
     if DEMO:
         return st.session_state.setdefault("demo_alerts", [])
-    from firebase_admin import firestore
-    q = db.collection("alerts").order_by("at", direction=firestore.Query.DESCENDING).limit(10)
-    return [{"id": d.id, **d.to_dict()} for d in q.stream()]
+    return _newest_first(list(live().alerts.values()), "at")
 
 
 def ack_alert(alert_id):
