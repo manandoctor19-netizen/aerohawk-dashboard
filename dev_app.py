@@ -96,6 +96,34 @@ def set_status(order_id, status):
         {"status": status, "updated_at": firestore.SERVER_TIMESTAMP, "manual_override": True})
 
 
+FINISHED = ("delivered", "cancelled")
+
+
+def delete_order(order_id):
+    if DEMO:
+        st.session_state.demo_orders = [o for o in st.session_state.demo_orders if o["id"] != order_id]
+        return
+    db.collection("orders").document(order_id).delete()
+
+
+def clear_finished_orders():
+    """Delete every delivered or cancelled order. Returns how many were removed."""
+    if DEMO:
+        before = len(st.session_state.demo_orders)
+        st.session_state.demo_orders = [o for o in st.session_state.demo_orders if o.get("status") not in FINISHED]
+        return before - len(st.session_state.demo_orders)
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    n, batch = 0, db.batch()
+    for d in db.collection("orders").where(filter=FieldFilter("status", "in", list(FINISHED))).stream():
+        batch.delete(d.reference)
+        n += 1
+        if n % 400 == 0:           # Firestore batches hold up to 500 writes
+            batch.commit()
+            batch = db.batch()
+    batch.commit()
+    return n
+
+
 def set_kitchen(order_id, kitchen_status):
     """Kitchen progress (new -> preparing -> ready). The robot's status is separate and unchanged."""
     if DEMO:
@@ -416,9 +444,16 @@ def orders_panel():
     st.caption("Override buttons change the status the student sees. Use them if the robot gets stuck during the demo. "
                "At delivery, check the student's pickup code against this list.")
     orders = get_orders()
+    n_done = sum(1 for o in orders if o.get("status") in FINISHED)
+    if st.button(f"🧹 Clear finished orders ({n_done} shown)", disabled=n_done == 0,
+                 help="Deletes every delivered and cancelled order. Active orders stay."):
+        removed = clear_finished_orders()
+        st.toast(f"Removed {removed} finished order(s)")
+        st.rerun(scope="fragment")
     if not orders:
         st.info("No orders yet.")
         return
+    pending = st.session_state.get("pending_delete")
     for o in orders:
         with st.container(border=True):
             a, b = st.columns([3, 2])
@@ -431,9 +466,26 @@ def orders_panel():
             cur = o.get("status")
             new = b.selectbox("Set status", STATUSES, index=STATUSES.index(cur) if cur in STATUSES else 0,
                               key=f"sel_{o['id']}", label_visibility="collapsed")
-            if b.button("Apply", key=f"btn_{o['id']}", disabled=(new == cur)):
+            c1, c2 = b.columns(2)
+            if c1.button("Apply", key=f"btn_{o['id']}", disabled=(new == cur), use_container_width=True):
                 set_status(o["id"], new)
                 st.rerun(scope="fragment")
+            if pending != o["id"]:
+                if c2.button("🗑️ Remove", key=f"del_{o['id']}", use_container_width=True):
+                    st.session_state.pending_delete = o["id"]
+                    st.rerun(scope="fragment")
+            else:
+                active = cur not in FINISHED
+                b.warning("Remove this order?" + (" It's still active: the student's page will say the order "
+                                                   "can't be found." if active else ""))
+                y, n = b.columns(2)
+                if y.button("Yes, remove", key=f"yes_{o['id']}", type="primary", use_container_width=True):
+                    delete_order(o["id"])
+                    st.session_state.pending_delete = None
+                    st.rerun(scope="fragment")
+                if n.button("Cancel", key=f"no_{o['id']}", use_container_width=True):
+                    st.session_state.pending_delete = None
+                    st.rerun(scope="fragment")
 
 
 @st.fragment(run_every=3)
