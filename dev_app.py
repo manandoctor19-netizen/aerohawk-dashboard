@@ -467,6 +467,63 @@ def kitchen_panel():
                     st.rerun(scope="fragment")
 
 
+# ---------------------------------------------------------------------------
+# 🚨 Alerts (someone hit the robot, etc.): always on top, checked every 3 s
+# ---------------------------------------------------------------------------
+def get_alerts():
+    if DEMO:
+        return st.session_state.setdefault("demo_alerts", [])
+    from firebase_admin import firestore
+    q = db.collection("alerts").order_by("at", direction=firestore.Query.DESCENDING).limit(10)
+    return [{"id": d.id, **d.to_dict()} for d in q.stream()]
+
+
+def ack_alert(alert_id):
+    if DEMO:
+        for a in st.session_state.demo_alerts:
+            if a["id"] == alert_id:
+                a["acknowledged"] = True
+        return
+    db.collection("alerts").document(alert_id).update({"acknowledged": True})
+
+
+def send_test_alert():
+    data = {"type": "test", "message": "Test alert from the dashboard", "acknowledged": False}
+    if DEMO:
+        st.session_state.setdefault("demo_alerts", []).insert(0, {**data, "id": f"t{time.time_ns()}", "at": now_utc()})
+        return
+    from firebase_admin import firestore
+    db.collection("alerts").add({**data, "at": firestore.SERVER_TIMESTAMP})
+
+
+@st.fragment(run_every=3)
+def alerts_panel():
+    try:
+        open_alerts = [a for a in get_alerts() if not a.get("acknowledged")]
+    except Exception:
+        return
+    seen = st.session_state.setdefault("seen_alerts", set())
+    for a in open_alerts:
+        if a["id"] not in seen:
+            seen.add(a["id"])
+            st.toast(f"🚨 {a.get('message', 'Robot alert')}", icon="🚨")
+    for a in open_alerts:
+        at = a.get("at")
+        when = f"{(now_utc() - at).total_seconds() / 60:.0f} min ago" if at else ""
+        with st.container(border=True):
+            st.error(f"🚨 **{a.get('message', 'Robot alert')}**  ·  {when}"
+                     + (f"  ·  robot was: {a['robot_state']}" if a.get("robot_state") else ""))
+            if a.get("camera_jpeg"):
+                st.image(base64.b64decode(a["camera_jpeg"]), caption="Camera at the moment of the alert", width=320)
+            if a.get("lat") and a.get("lon"):
+                st.caption(f"Location: {a['lat']:.6f}, {a['lon']:.6f}")
+            if st.button("✅ Handled", key=f"ack_{a['id']}"):
+                ack_alert(a["id"])
+                st.rerun(scope="fragment")
+
+
+alerts_panel()
+
 tab_robot, tab_kitchen = st.tabs(["🤖 Robot", "🍕 Kitchen"])
 with tab_robot:
     control_panel()
@@ -475,3 +532,7 @@ with tab_robot:
     orders_panel()
 with tab_kitchen:
     kitchen_panel()
+
+with st.expander("🔧 Test the alert system"):
+    st.caption("Sends a fake alert so you can check the red banner works. Click ✅ Handled to clear it.")
+    st.button("Send test alert", on_click=send_test_alert)
