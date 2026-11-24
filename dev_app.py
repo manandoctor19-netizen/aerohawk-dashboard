@@ -283,7 +283,6 @@ def stream_html(url):
     (/frame.jpg) instead of a pushed stream that piles up delay on slow internet.
     Falls back to the old MJPEG stream for links without /frame.jpg support."""
     frame = url.replace("/stream?", "/frame.jpg?") if "/stream?" in url else ""
-    # (WORKERS parallel pulls; the robot sends each camera frame at most once per request)
     return f"""
 <style>html,body{{margin:0;background:transparent}}</style>
 <div style="position:relative;height:396px;background:#1c1f26;border-radius:12px;overflow:hidden">
@@ -300,36 +299,28 @@ def stream_html(url):
 <script>
 const v=document.getElementById('v'), m=document.getElementById('m'),
       live=document.getElementById('live'), fpsEl=document.getElementById('fps');
-const frameUrl="{frame}", streamUrl="{url}";
-const WORKERS=4;          // several requests in flight, so internet delay doesn't cap the fps
-let req=0, shownFrame=-1, shownReq=0, nextWant=0, last=null, n=0, t0=Date.now(), fails=0;
+const frameUrl="{frame}", streamUrl="{url}", MIN_GAP=70;   // at most ~14 pictures a second
+let last=null, n=0, t0=Date.now(), fails=0;
 function ok(){{ m.style.display='none'; v.style.display='block'; live.style.display='inline'; fails=0; }}
-function bad(){{ if(++fails>=WORKERS*2){{ m.style.display='flex'; v.style.display='none';
+function bad(){{ if(++fails>=3){{ m.style.display='flex'; v.style.display='none';
   live.style.display='none'; fpsEl.textContent=''; }} }}
-const sleep=ms=>new Promise(z=>setTimeout(z,ms));
-async function worker(){{
+async function loop(){{
   while(true){{
-    const my=++req;
+    const start=Date.now();
     try{{
-      // want=: each request asks for a DIFFERENT upcoming frame; the robot holds it until ready
-      const want=Math.max(nextWant, shownFrame+1); nextWant=want+1;
-      const r=await fetch(frameUrl+'&n='+my+'&want='+want,{{cache:'no-store'}});
-      if(r.status===204) continue;
+      const r=await fetch(frameUrl+'&n='+start,{{cache:'no-store'}});
       if(!r.ok) throw 0;
-      const f=parseInt(r.headers.get('X-Frame')||my), b=await r.blob();
-      if(f>shownFrame && my>shownReq){{            // only ever show a NEWER picture
-        shownFrame=f; shownReq=my;
-        const u=URL.createObjectURL(b); v.src=u; if(last) URL.revokeObjectURL(last); last=u;
-        ok(); n++;
-      }}
+      const u=URL.createObjectURL(await r.blob());
+      v.src=u; if(last) URL.revokeObjectURL(last); last=u; ok(); n++;
       if(Date.now()-t0>2000){{ fpsEl.textContent=(n*1000/(Date.now()-t0)).toFixed(0)+' fps';
         n=0; t0=Date.now(); }}
-    }}catch(e){{ bad(); await sleep(2000); }}
+      const wait=MIN_GAP-(Date.now()-start); if(wait>0) await new Promise(z=>setTimeout(z,wait));
+    }}catch(e){{ bad(); await new Promise(z=>setTimeout(z,2000)); }}
   }}
 }}
-if(frameUrl) for(let i=0;i<WORKERS;i++) setTimeout(worker, i*15);
+if(frameUrl) loop();
 else {{ v.src=streamUrl; v.onload=ok;
-  v.onerror=()=>{{ fails=99; bad(); setTimeout(()=>{{ v.src=streamUrl+'&r='+Date.now(); }},3000); }}; }}
+  v.onerror=()=>{{ fails=3; bad(); setTimeout(()=>{{ v.src=streamUrl+'&r='+Date.now(); }},3000); }}; }}
 </script>"""
 
 
