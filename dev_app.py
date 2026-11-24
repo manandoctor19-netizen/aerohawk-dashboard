@@ -279,24 +279,48 @@ align-items:center;justify-content:center;color:#8a8f99;text-align:center;paddin
 
 
 def stream_html(url):
-    """Live MJPEG video in the page; retries every 3 s if the robot can't be reached."""
+    """Live video that never falls behind: pulls the robot's NEWEST frame again and again
+    (/frame.jpg) instead of a pushed stream that piles up delay on slow internet.
+    Falls back to the old MJPEG stream for links without /frame.jpg support."""
+    frame = url.replace("/stream?", "/frame.jpg?") if "/stream?" in url else ""
     return f"""
 <style>html,body{{margin:0;background:transparent}}</style>
 <div style="position:relative;height:396px;background:#1c1f26;border-radius:12px;overflow:hidden">
-  <img id="v" src="{url}" style="width:100%;height:100%;object-fit:contain;display:block">
+  <img id="v" style="width:100%;height:100%;object-fit:contain;display:block">
   <div id="m" style="display:none;position:absolute;inset:0;color:#8a8f99;font-family:sans-serif;
        align-items:center;justify-content:center;text-align:center;padding:20px">
-    <div><div style="font-size:2.2rem">📷</div>Live stream not reachable, retrying…<br>
+    <div><div style="font-size:2.2rem">📷</div>Live camera not reachable, retrying…<br>
     <small>Robot off, or try another option in Stream settings</small></div></div>
-  <span id="live" style="position:absolute;top:10px;left:10px;background:#c0392b;color:#fff;
+  <span id="live" style="display:none;position:absolute;top:10px;left:10px;background:#c0392b;color:#fff;
        font:600 12px sans-serif;padding:3px 8px;border-radius:6px">● LIVE</span>
+  <span id="fps" style="position:absolute;top:10px;right:10px;color:#fff;background:#0008;
+       font:12px sans-serif;padding:3px 8px;border-radius:6px"></span>
 </div>
 <script>
-const v=document.getElementById('v'), m=document.getElementById('m'), live=document.getElementById('live');
-const base="{url}";
-v.onerror=()=>{{ m.style.display='flex'; v.style.display='none'; live.style.display='none';
-  setTimeout(()=>{{ v.style.display='block'; v.src=base+'&r='+Date.now(); }}, 3000); }};
-v.onload=()=>{{ m.style.display='none'; live.style.display='inline'; }};
+const v=document.getElementById('v'), m=document.getElementById('m'),
+      live=document.getElementById('live'), fpsEl=document.getElementById('fps');
+const frameUrl="{frame}", streamUrl="{url}", MIN_GAP=70;   // at most ~14 pictures a second
+let last=null, n=0, t0=Date.now(), fails=0;
+function ok(){{ m.style.display='none'; v.style.display='block'; live.style.display='inline'; fails=0; }}
+function bad(){{ if(++fails>=3){{ m.style.display='flex'; v.style.display='none';
+  live.style.display='none'; fpsEl.textContent=''; }} }}
+async function loop(){{
+  while(true){{
+    const start=Date.now();
+    try{{
+      const r=await fetch(frameUrl+'&n='+start,{{cache:'no-store'}});
+      if(!r.ok) throw 0;
+      const u=URL.createObjectURL(await r.blob());
+      v.src=u; if(last) URL.revokeObjectURL(last); last=u; ok(); n++;
+      if(Date.now()-t0>2000){{ fpsEl.textContent=(n*1000/(Date.now()-t0)).toFixed(0)+' fps';
+        n=0; t0=Date.now(); }}
+      const wait=MIN_GAP-(Date.now()-start); if(wait>0) await new Promise(z=>setTimeout(z,wait));
+    }}catch(e){{ bad(); await new Promise(z=>setTimeout(z,2000)); }}
+  }}
+}}
+if(frameUrl) loop();
+else {{ v.src=streamUrl; v.onload=ok;
+  v.onerror=()=>{{ fails=3; bad(); setTimeout(()=>{{ v.src=streamUrl+'&r='+Date.now(); }},3000); }}; }}
 </script>"""
 
 
